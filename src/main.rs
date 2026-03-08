@@ -4,15 +4,17 @@ use discord_rich_presence::{
     DiscordIpc, DiscordIpcClient,
     activity::{self, Activity, ActivityType, Assets, StatusDisplayType, Timestamps},
 };
+use platform_dirs::AppDirs;
 use reqwest::{Client, multipart};
 use serde::Deserialize;
-use std::sync::Arc;
 use std::{
     fs,
     io::{BufRead, BufReader},
+    path::Path,
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 async fn post(
@@ -71,7 +73,7 @@ struct Response {
     data: ResponseData,
 }
 
-fn write_image(bytes: Option<&String>, img_type: Option<&String>) -> String {
+fn write_image(bytes: Option<&String>, img_type: Option<&String>, config_path: &PathBuf) -> String {
     if bytes.is_none() || img_type.is_none() {
         return "placeholder".to_string();
     }
@@ -80,61 +82,20 @@ fn write_image(bytes: Option<&String>, img_type: Option<&String>) -> String {
 
     let kind: Vec<&str> = img_type.unwrap().split("/").collect();
 
-    let path = format!("assets/cover.{}", kind[1]);
+    let path = format!("{}/cover.{}", config_path.to_str().unwrap(), kind[1]);
 
     fs::write(&path, decoded).unwrap();
 
     return path;
 }
 
-fn populate_media(media: &mut MediaInfo, update: &MediaInfo) {
-    if update.title.is_some() {
-        media.title = update.title.clone();
-    }
-    if update.artist.is_some() {
-        media.artist = update.artist.clone();
-    }
-    if update.album.is_some() {
-        media.album = update.album.clone();
-    }
-    if update.artworkData.is_some() {
-        media.artworkData = update.artworkData.clone();
-    }
-    if update.playing.is_some() {
-        media.playing = update.playing.clone();
-    }
-    if update.elapsedTimeMicros.is_some() {
-        media.elapsedTimeMicros = update.elapsedTimeMicros.clone();
-    }
-    if update.durationMicros.is_some() {
-        media.durationMicros = update.durationMicros.clone();
-    }
-    if update.timestampEpochMicros.is_some() {
-        media.timestampEpochMicros = update.timestampEpochMicros.clone();
-    }
-}
-
-//fn get_info() -> Option<MediaInfo> {
-//    let output = Command::new("media-control")
-//        .arg("get")
-//        .arg("--micros")
-//        .output()
-//        .ok()?;
-//
-//    let json = String::from_utf8(output.stdout).ok()?;
-//    //println!("{:?}", json);
-//
-//    let media: MediaInfo = serde_json::from_str(&json).ok()?;
-//
-//    return Some(media);
-//}
-
 async fn get_stream(
     mut media: MediaInfo,
     discord_client: Arc<Mutex<DiscordIpcClient>>,
     client: &Client,
+    path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = Command::new("media-control")
+    let mut stream = Command::new("/opt/homebrew/bin/media-control")
         .arg("stream")
         .arg("--micros")
         .arg("--no-diff")
@@ -142,7 +103,22 @@ async fn get_stream(
         .spawn()
         .unwrap();
 
-    let placeholder_image_bytes = fs::read_to_string("assets/placeholder").unwrap();
+    let exe = std::env::current_exe().unwrap();
+
+    let resource_path = exe
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("Resources")
+        .join("placeholder");
+
+    let placeholder_image_bytes = fs::read_to_string(if resource_path.exists() {
+        resource_path.to_str().unwrap_or("assets/placeholder")
+    } else {
+        "assets/placeholder"
+    })
+    .unwrap();
 
     {
         let stdout = stream.stdout.take().unwrap();
@@ -190,7 +166,7 @@ async fn get_stream(
             media = text;
             media.url = url_clone;
 
-            if update_presence(&mut media, &discord_client, update_image, client)
+            if update_presence(&mut media, &discord_client, update_image, client, &path)
                 .await
                 .is_err()
             {
@@ -208,10 +184,15 @@ async fn update_presence(
     presence_client: &Arc<Mutex<DiscordIpcClient>>,
     update_image: bool,
     client: &Client,
+    config_path: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path: String;
 
-    path = write_image(media.artworkData.as_ref(), media.artworkMimeType.as_ref());
+    path = write_image(
+        media.artworkData.as_ref(),
+        media.artworkMimeType.as_ref(),
+        config_path,
+    );
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
     let timestamp = media.timestampEpochMicros.unwrap_or(now) as i64;
@@ -310,6 +291,10 @@ async fn update_presence(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app_dirs = AppDirs::new(Some("com.zshleyp.macos-presence"), false).unwrap();
+
+    fs::create_dir_all(&app_dirs.config_dir).unwrap();
+
     let request_client = reqwest::Client::new();
 
     let mut client = DiscordIpcClient::new("1478993515869507664");
@@ -322,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let media = MediaInfo::default();
 
     tokio::spawn(async move {
-        get_stream(media, stream_client, &request_client)
+        get_stream(media, stream_client, &request_client, app_dirs.config_dir)
             .await
             .unwrap();
     })
