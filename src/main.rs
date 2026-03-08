@@ -25,6 +25,8 @@ async fn post(
     let form = multipart::Form::new().part("file", part);
 
     let res = client
+        //if you have another server you wanna use you can use that as well.
+        //i dont implement caching since timpfiles deletes files after an hour.
         .post("https://tmpfiles.org/api/v1/upload")
         .multipart(form)
         .send()
